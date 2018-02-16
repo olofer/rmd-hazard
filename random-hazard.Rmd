@@ -1,0 +1,385 @@
+---
+title: "Random trajectory in a hazardous landscape"
+author: K Erik J Olofsson
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    smart: false
+    toc: true
+    toc_float: true
+---
+
+```{r start-clock, include=FALSE}
+ptm <- proc.time()
+```
+
+```{r note-to-self, include=FALSE, eval=FALSE}
+# set.seed(123454321)  # could be used if a particular realization should be replicated
+# might want to add this stuff to improve the parallel PRNGs ?!
+# library(doRNG)
+# registerDoRNG()
+```
+
+This `rmarkdown` document was built with `R` version `r getRversion()`.
+
+```{r build-example, eval=FALSE}
+# Reproduce this document as follows.
+rmarkdown::render('random-hazard.Rmd')
+```
+
+This notebook illustrates some interesting relations which may or may not be useful when dealing with dynamical systems and survival analysis. In what follows, SDE and PDE are abbreviations for Stochastic and Partial Differential Equations. See the source file `random-hazard-utils.R` for additional required notebook sources (PDE related subprograms and first-visit counting statistics utilities) which are not explicitly shown in the notebook.
+
+```{r setup}
+source('random-hazard-utils.R')  # additional source code
+
+library(survival)
+library(foreach)
+library(viridis)  # nice colors
+
+this.clus <- NULL
+num.Workers <- 4  # how many parallel workers to use below (where applicable)
+
+`%doop%` <- ifelse(num.Workers > 1, `%dopar%`, `%do%`)
+
+if (num.Workers > 1) {
+  library(doParallel)
+  this.clus <- makeCluster(num.Workers)
+  registerDoParallel(this.clus)
+  print(sprintf('parallel workers = %i', getDoParWorkers()))
+} else {
+  print('sequential worker')
+}
+```
+
+## Langevin dynamics
+
+Consider the overdamped Langevin equation (in the form of a time-homogeneous drift-diffusion SDE)
+$$dX = f(X)dt + \sigma(X)dW$$
+describing the (random) position $X$ of a particle moving in a thermal environment. The drift term $f(x)$ is defined by the gradient of the potential energy landscape $V(x)$. The diffusion $\sigma(x)>0$ is determined by the ambient temperature. $W$ is the standard Wiener process. In particular
+$$f(x) = -(1/\gamma)\frac{\partial V(x)}{\partial x}$$
+where $\gamma$ is the Stokes friction coefficient and
+$$\sigma(x)=\sqrt{2D} = \sqrt{2 k_B T / \gamma}$$
+with $T$ the temperature, $D$ the diffusion coefficient, and $k_B$ the Boltzmann constant. Fluctuation-Dissipation states the relation $\gamma D = k_B T$. In the special case that $V(x)$ is a harmonic potential $\sim (x-x_0)^2$, the above dynamical system is known as the Ornstein-Uhlenbeck SDE (which is closed-form solvable).
+
+### A non-dimensional instance
+
+The dynamical systems equation above looks exactly the same in non-dimensional form. Normalized length $\hat{x}=x/L_0$, energy $\hat{V}=V/U_0$, and time $\hat{t}=t/\tau_0$ will be implied. The coefficient normalization evaluates to $\hat{D}=D\tau_0/L_0^2$ and $\hat{\gamma}=\gamma/(U_0\tau_0/L_0^2)$. Set the energy normalization $U_0=k_BT_0/2$ with a reference temperature $T_0$, so that $\hat{D}=2(T/T_0)/\hat{\gamma}$.
+
+Suppose now that we have a Silica micropoarticle, with radius $R=1\,\mu\mathrm{m}$, and mass $M=11\,\mathrm{pg}$ in water at room temperature $T_0=293\,\mathrm{K}$. Let $\gamma=6\pi\eta R$ with $\eta=0.001\,\mathrm{N}\mathrm{s}/\mathrm{m}^2$. So $\gamma=1.89\,\mathrm{N}\mathrm{s}/\mathrm{m}$. The momentum relaxation time is $\tau_p=M/\gamma\approx 0.6\,\mu\mathrm{s}$. Therefore the overdamped Langevin equation is not really (physically) meaningful for sub-microsecond time scales in this context.
+
+Now take
+
+- $\tau_0=1\,\mathrm{m}\mathrm{s}$ (millisecond)
+- $L_0=10\,\mathrm{n}\mathrm{m}$ (nanometer)
+
+Then our system parameters are as follows.
+
+- $\hat{D}=2.146\times(T/T_0)$
+- $\hat{\gamma}=0.932$
+
+To finalize the example system we need to define a potential landscape $\hat{V}(\hat{x})$. Here is our definition in `R` code.
+
+```{r}
+# Use (d/dx) exp(-(x/a)^2) = (-2*x/a^2) * exp(-(x/a)^2)
+# (it is also fun to explore different potential landscapes)
+V.x <- function(x) { (-4) * exp(-(x/1)^2) }
+f.x <- function(x) { -(1/0.932) * (-4) * (-2 * x / 1^2) * exp(-(x/1)^2) }
+sigma.x <- function(x) { rep(sqrt(2 * 2.146 * ( 293.0 / 293.0)), length(x)) }
+SDE.parameters <- list(a = f.x, b = sigma.x)
+```
+
+```{r include = FALSE}
+# Sanity check; catch mis-specifications above
+uniab <- c(-runif(1), runif(1))
+val.0 <- V.x(uniab[2]) - V.x(uniab[1])
+val.1 <- integrate(function(x) { -0.932 * f.x(x)}, uniab[1], uniab[2])$value
+# print(c(val.0, val.1)) 
+stopifnot(abs(val.1 - val.0) / max(c(1, abs(val.0))) < 1e-6)
+```
+
+Remember that the potential is given in units of $k_BT_0/2$ in the non-dimensional form. In what follows, the hatted notation will be omitted unless it is important for the context. Let us take a look at the potential function defined above.
+
+```{r}
+xg <- seq(from = -5, to = 5, len = 200)
+plot(xg, V.x(xg), type = 'l', lwd = 2, col = 'blue', 
+  xlab = expression('x/L'[0]), ylab = expression('V/U'[0]),
+  main = 'Potential function V') 
+```
+
+### Sample paths
+
+Path samples of the system can be obtained with Euler-Maruyama integration. Let the initial condition be $X(0)=x_0$ (for some fixed $x_0$) and terminate the path when (i) the elapsed time reaches $t=t_{max}$ or (ii) the path reaches the boundary $|X(t)|=x_{bdy}$. In terms of survival analysis, to be explored more below, case (i) is (right) censored whereas case (ii) is a (death) event. This setup can be seen as a First Hitting Time situation but with the possibility of timing out the experiment.
+
+
+```{r}
+Euler.Maruyama.FHT <- function(params, dt, tmax, x0, xbdy) {
+  # Solve the (scalar) SDE: dX = a(X) * dt + b(X) * dW, X(0) = x0
+  # with forward Euler time-step dt until either t=tmax or |X|=xbdy
+  stopifnot(xbdy > 0 && tmax > dt && dt > 0)
+  stopifnot(abs(x0) < xbdy)
+  nmax <- round(tmax / dt)
+  tx <- array(0, c(nmax, 2))
+  x <- x0; t <- 0; k <- 0; sqrt_dt <- sqrt(dt)
+  while (k < nmax && abs(x) < xbdy) {
+    t <- t + dt
+    x <- x + dt * params$a(x) +  params$b(x) * sqrt_dt * rnorm(1)
+    k <- k + 1
+    tx[k, 1] <- t
+    tx[k, 2] <- x
+  }
+  list(t = tx[1:k, 1], x = tx[1:k, 2], event = (abs(x) >= xbdy))
+}
+```
+
+Here are a few sample paths using the above SDE stepping code.
+
+```{r}
+hard.x.bdy = 3.0
+sde.dt <- 2.0e-4
+time.out <- 10.0
+the.col.map <- viridis(10)
+init.x <- 2 * runif(1) - 1  # fixed random starting coordinate
+plot(c(0, time.out), c(0, 0), type = 'l', col = 'black', lty = 2,
+  xlab = 'normalized time', ylab = 'normalized position', ylim = c(-hard.x.bdy, hard.x.bdy),
+  main = 'Hard boundary sample paths')
+for (i in 1:length(the.col.map)) {
+  sde.haz.result <- Euler.Maruyama.FHT(SDE.parameters, dt = sde.dt, tmax = time.out, x0 = init.x, hard.x.bdy)
+  lines(sde.haz.result$t, sde.haz.result$x, col = the.col.map[i], lwd = 2)
+  if (sde.haz.result$event) {
+    nt <- length(sde.haz.result$t) # extract position of the FHT event
+    points(sde.haz.result$t[nt], sde.haz.result$x[nt], pch = 3, cex = 1, col = 'red', lwd = 4)
+  }
+}
+# Show the hard boundary
+lines(c(0, time.out), c(1, 1) * hard.x.bdy, col = 'red', lty = 2)
+lines(c(0, time.out), c(1, 1) * -hard.x.bdy, col = 'red', lty = 2)
+```
+
+And using basic survival analysis and many samples we get an idea of the First Hitting Time distribution (the time it takes to escape the potential well).
+
+```{r}
+# Draw path samples and collect the end times and type of stop (i) or (ii) as detailed in the text
+num.FHT.samples <- 500
+fht.E <- foreach (i = 1:num.FHT.samples, .combine = 'rbind',
+  .multicombine = TRUE, .inorder = FALSE) %doop% {
+  sde.result <- Euler.Maruyama.FHT(SDE.parameters, dt = sde.dt, tmax = time.out,
+    x0 = init.x, xbdy = hard.x.bdy)
+  num.steps <- length(sde.result$t)
+  c(sde.result$t[num.steps], ifelse(sde.result$event, 1, 0))
+}
+
+# Kaplan-Meier estimator for right-censored data
+fht.KM <- survfit(Surv(fht.E[, 1], fht.E[, 2]) ~ 1)
+
+# Get the PDE reference solution
+pde.dt <- 5 * sde.dt
+pde.grid.size <- 100 
+fht.pde <- cheb.solve.PDE.absorbing(
+  f.x, sigma.x, function(x) {0 * x}, n = pde.grid.size, dt = pde.dt,
+  xa = -hard.x.bdy, xb = hard.x.bdy, tmax = time.out, xx = c(init.x))
+
+# Show both reference solution and sample estimate
+plot(fht.pde$t, fht.pde$ux, col = 'black', lwd = 2, type = 'l',
+  xlab = 'normalized time t', ylab = sprintf('Prob[T > t | X(0) = %f]', init.x),
+  main = sprintf('Event statistics (hard boundary): %i samples', num.FHT.samples))
+lines(fht.KM$time, fht.KM$surv, col = 'blue', lwd = 2)
+lines(fht.KM$time, fht.KM$upper, col = 'blue', lwd = 1, lty = 2)
+lines(fht.KM$time, fht.KM$lower, col = 'blue', lwd = 1, lty = 2)
+legend('topright', c('PDE reference', 'Sample estimate'),
+  text.col = c('black', 'blue'))
+```
+
+Notice that small $dt$ (time increments) used in these simulations to reduce discretization errors. Otherwise the PDE reference and the SDE sample distributions may not be good matches. How the reference PDE solution is obtained will become more clear in the next section.
+
+## Event probability
+
+In the previous section the path termination condition was a hard boundary in space or time. In this section the path termination process will be generalized to accomodate graded boundaries (in space) in a random sense as will be explained. Introduce the (expected) path integral
+$$u(t,x) = \mathrm{E}\left[ \exp\left( -\int_{\tau=0}^t h(X(\tau)) d\tau \right) \Bigg\rvert X(0) = x \right]$$
+taken along trajectories of the above SDE. All values $u(t,x)$ for $t\geq 0$, $-\infty < x < \infty$, are of interest. It holds that $u(t=0,x)=1$. The function $h(\cdot)$ is non-negative and can be interpreted as the rate (events per unit of time) at which paths are terminated at a particular point in space. For the hitting time problem above, we can think of $h(x)=0$ in $|x| < x_{bdy}$, and $h(x)=+\infty$ elsewhere.
+
+### Survival Analysis interpretation
+
+The function $h(x)$ is known as a hazard function and the above expected path integral $u(t,x)$ is the conditional probability of surviving for longer than $t$ into the future, given the current state is $x$. Recall from Survival Analysis that
+$$\mathrm{Pr}\left[T>t\right] = \exp\left\{ -\int_{\tau=0}^t \lambda(\tau) d\tau \right\}$$
+for a positive random event time $T$ (not the temperature anymore), where $\lambda(t)$ is a time-varying non-negative hazard function. Our situation is similar but with a stochastic process providing the time-dependence of the hazard through the state variable (covariate) $x$. If $\lambda(t)=\lambda$ is independent of time, the random variate $T$ degenerates to a standard (memoryless) exponential random variate.
+
+### Sample paths
+
+We will use the same dynamical system (Langevin equation) as in the First Hitting Time experiment above, but this time augmented with a state-dependent hazard function. The next code segments defines the new simulation.
+
+```{r}
+h.x <- function(x) { (1 - exp(-(x/2)^2))^8 * 2.0 }
+plot(xg, h.x(xg), type = 'l', col = 'red', lwd = 2,
+  xlab = expression('x/L'[0]), ylab = 'Event rate [1/time]', main = 'Hazard function h')
+```
+
+```{r}
+Euler.Maruyama.HAZ <- function(params, dt, tmax, x0, haz) {
+  # Simulate SDE: dX = a(X) * dt + b(X) * dW until random termination
+  # determined by the local death intensity haz(X), or until time-out t = tmax
+  # whichever comes first.
+  stopifnot(tmax > dt && dt > 0)
+  stopifnot(is.function(haz))
+  nmax <- round(tmax / dt)
+  tx <- array(0, c(nmax, 2))
+  x <- x0; t <- 0; k <- 0; sqrt_dt <- sqrt(dt); is.dead <- FALSE
+  while (k < nmax && !is.dead) {
+    t <- t + dt
+    x <- x + dt * params$a(x) +  params$b(x) * sqrt_dt * rnorm(1)
+    is.dead <- (runif(1) > exp(-haz(x) * dt))
+    k <- k + 1
+    tx[k, 1] <- t
+    tx[k, 2] <- x
+  }
+  list(t = tx[1:k, 1], x = tx[1:k, 2], event = is.dead)
+}
+```
+
+Here is a handful of sample paths, using the updated (hazard-enabled) SDE stepping code.
+
+```{r}
+plot(c(0, time.out), c(0, 0), type = 'l', col = 'black', lty = 2,
+  xlab = 'normalized time', ylab = 'normalized position', ylim = c(-6, 6),
+  main = 'Hazard landscape sample paths')
+for (i in 1:length(the.col.map)) {
+  sde.haz.result <- Euler.Maruyama.HAZ(SDE.parameters, dt = sde.dt, tmax = time.out, x0 = init.x, h.x)
+  lines(sde.haz.result$t, sde.haz.result$x, col = the.col.map[i], lwd = 2)
+  if (sde.haz.result$event) {
+    nt <- length(sde.haz.result$t)  # extract death event
+    points(sde.haz.result$t[nt], sde.haz.result$x[nt], pch = 3, cex = 1, col = 'red', lwd = 4)
+  }
+}
+```
+
+The next subsection will calculate and display the path survival statistics for this hazard-enabled SDE for all initial conditions and all future times.
+
+### Deterministic PDE method 
+
+The Feynman-Kac relation states that $u(t,x)$ will solve the PDE
+$$-\frac{\partial u}{\partial t} + f(x)\frac{\partial u}{\partial x} + \frac{1}{2}\sigma^2(x)\frac{\partial^2 u}{\partial x^2} - h(x)u = 0$$
+with the initial condition $u(t=0,x) = 1$ (and boundary conditions where applicable). Time-inhomogeneous versions of this PDE are slightly more complicated because we are really solving a terminal condition backwards. See the references for more details on that.
+
+Therefore it is possible to obtain the complete conditional future-time survival probability
+$$u(t,x) = \mathrm{Pr}\left[T > t \Bigg\rvert X(0) = x \right]$$
+by solving a basic PDE once (when feasible) instead of sampling (many) SDEs. It should be understood that the initial condition $X(0)=x$ is not at time zero in some absolute sense. Rather it is the current time redefined as the new zero, making the event time $T$ relative also ($T$ time-units ahead into the future).
+
+```{r}
+# Solve Feynman-Kac PDE on the real line and project out an image of the survival map
+# See separate R code file for the Chebyshev-based solver
+x.grid <- seq(from = -6, to = 6, len = 200)
+fey.pde <- cheb.solve.PDE.unbounded(
+  f.x, sigma.x, h.x, n = 100, dt = pde.dt, L = 5,
+  tmax = time.out, xx = x.grid)
+```
+
+```{r}
+# Plot the survival map PDE solution
+filled.contour(fey.pde$t, x.grid, fey.pde$ux, nlevel = 50,
+  color.palette = viridis, xlab = 'time', ylab = 'space', main = 'Feynman-Kac u(t,x) = Prob[T > t | x]')
+```
+
+Maybe we do not quite yet believe this solution. Therefore invoke the Kaplan-Meier estimator again on a collection of path samples from the hazard-enabled SDE simulation code defined earlier. Again, a fixed initial condition is used for assessment (picked at random).
+
+```{r}
+x.fkc.idx <- sample(length(x.grid), size = 1)
+init.x.fkc <- x.grid[x.fkc.idx]
+num.FKC.samples <- 500
+fey.E <- foreach (i = 1:num.FKC.samples, .combine = 'rbind',
+  .multicombine = TRUE, .inorder = FALSE) %doop% {
+  sde.result <- Euler.Maruyama.HAZ(SDE.parameters, dt = sde.dt, tmax = time.out, x0 = init.x.fkc, h.x)
+  num.steps <- length(sde.result$t)
+  c(sde.result$t[num.steps], ifelse(sde.result$event, 1, 0))
+}
+
+# Kaplan-Meier estimator for right-censored data
+fey.KM <- survfit(Surv(fey.E[, 1], fey.E[, 2]) ~ 1)
+
+# Show both reference solution and sample estimate
+plot(fey.pde$t, fey.pde$ux[, x.fkc.idx], col = 'black', lwd = 2, type = 'l',
+  xlab = 'normalized time t', ylab = sprintf('Prob[T > t | X(0) = %f]', init.x.fkc),
+  main = sprintf('Event statistics (probabilistic boundary): %i samples', num.FKC.samples))
+lines(fey.KM$time, fey.KM$surv, col = 'blue', lwd = 2)
+lines(fey.KM$time, fey.KM$upper, col = 'blue', lwd = 1, lty = 2)
+lines(fey.KM$time, fey.KM$lower, col = 'blue', lwd = 1, lty = 2)
+legend('topright', c('PDE reference', 'Sample estimate'),
+  text.col = c('black', 'blue'))
+```
+
+## Statistical learning
+
+Given a set of path samples, how can the conditional survival be estimated? How can the hazard function be estimated? This will be illustrated here.
+
+### Conditional Survival mapping
+
+The previous section suggested that it is possible to approximate the PDE solution for the conditional survival function by taking many (right-censored / timed-out) SDE samples for every initial condition $x$ (in some preset interval) and then applying the Kaplan-Meier estimator. This works but seems wasteful because a sample path in fact visits more regions in space than only the initial point. A single sample path should therefore provide solution information for several space-time points. This subsection will show one way to do this.
+
+```{r further-note-to-self, include=FALSE, eval=FALSE}
+# - Write this with nice R code such that it parallelizes the path sampling and aggregation steps.
+#     - Producer / Consumer type of arrangement?
+# - Do it such a way as it is explicitly clear that there is a convergence towards the PDE solution as num.samples goes up...
+# - Hazard function estimation should be illustrated by special univariate smooth curve logistic regression
+# - Maybe also try a full SGD "push through" logistic regression for the joint u(t, x) estimation ...
+# - This will be illustrated here using Gradient Boosting Machines (GBMs) with the `xgboost` package.
+```
+
+Here is a way of sampling the survival function PDE solution over a domain using different SDEs that all start with initial condition zero.
+
+```{r pde-from-sde}
+# Use same initial condition as the previous sample set.
+# And use same number of path samples as previous set too.
+xsrv <- seq(from = -6, to = 6, len = 201)
+tsrv <- seq(from = 0, to = time.out, len = 1000)
+A <- foreach (i = 1:num.FKC.samples, .combine = 'combine.count.matrices',
+  .multicombine = FALSE, .inorder = FALSE) %doop% {
+  sde.result <- Euler.Maruyama.HAZ(SDE.parameters, dt = sde.dt,
+    tmax = time.out, x0 = 0, h.x)
+  get.count.matrices(sde.result$t, sde.result$x, sde.result$event, xsrv, tsrv)
+}
+
+mid.xsrv <- get.midpoints(xsrv)
+srv <- extract.survival.map(A)
+image(tsrv, mid.xsrv, t(srv),
+  xlab = 'time', ylab = 'space',
+  main = 'Sampled Prob[T > t | x] (zero IC)', col = viridis(50))
+```
+
+Even though we are starting all paths at zero, we do get conditional survival information over a range of space coordinates $x$. We have poorer statistics (fewer path visits) far from $x=0$ but a decent image of the PDE solution emerges nevertheless. If we take the same number of path samples but initialize $X(0)$ uniformly in the space range of the previous plot, the overall picture improves (maybe), as seen below (possibly).
+
+```{r pde-from-sde-uniformly, echo=FALSE}
+A.unif <- foreach (i = 1:num.FKC.samples, .combine = 'combine.count.matrices',
+  .multicombine = FALSE, .inorder = FALSE) %doop% {
+  sde.result <- Euler.Maruyama.HAZ(SDE.parameters, dt = sde.dt,
+    tmax = time.out, x0 = 6 * (2 * runif(1) - 1), h.x)
+  get.count.matrices(sde.result$t, sde.result$x, sde.result$event, xsrv, tsrv)
+}
+srv.unif <- extract.survival.map(A.unif)
+image(tsrv, mid.xsrv, t(srv.unif),
+  xlab = 'time', ylab = 'space',
+  main = 'Sampled Prob[T > t | x] (uniform IC)', col = viridis(50))
+```
+
+**YET TO BE FINALIZED** 
+
+### Hazard function estimation
+
+It turns out that it is possible to formulate a supervised learning problem directly for the hazard function. In the above hazard model it is implied that the survival or death at each time-step is an independent binary outcome of a trial with a exponential random variate where the parameter is covariate-dependent. If the outcome is death/event, then the path is terminated. Otherwise the path proceeds to the next step. And so on. As a result each path can be encoded with outcome labels in one of two ways: (i) all outcome labels are zero if the path is right-censored and (ii) all outcome labels are zero except the last label which is one (terminating event observation).
+
+Therefore if we use cross-entropy as the loss function this setup is equivalent to maximum-likelihood estimation of the hazard function. It would seem we have an extremely imbalanced classification problem but this is illusory. Each individual trial event probability is just very small (for small $dt$).
+
+**YET TO BE DONE** 
+
+## References
+
+1. C. Gardiner, *Stochastic Methods*, 4th edition, Springer, 2009
+2. J. F. Lawless, *Statistical Models and Methods for Lifetime Data*, Wiley, 2003
+
+
+```{r stop-cluster, include=FALSE, eval=TRUE}
+if (!is.null(this.clus)) {
+  stopCluster(this.clus)
+}
+```
+
+```{r stop-clock, echo=FALSE}
+print(proc.time() - ptm)
+```
