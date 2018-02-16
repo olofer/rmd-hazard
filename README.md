@@ -8,4 +8,4 @@ The document is reproducible from within the `R` environment by calling the `rma
 
 ## Preview
 
-It is possible to pre-view what to expect by following this [link!](http://htmlpreview.github.com/?https://github.com/olofer/rmd-hazard/blob/master/sample-doc/random-hazard.html)
+It is possible to pre-view what to expect by following [this link](http://htmlpreview.github.com/?https://github.com/olofer/rmd-hazard/blob/master/sample-doc/random-hazard.html).
