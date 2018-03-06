@@ -40,12 +40,12 @@ for (i in 1:n) {
   yh.y.x.l[i, ] <- c(yh, y, x, l)
 }
 
+ny <- sum(yh.y.x.l[, 2])
+
 # Show what to expect
 print(head(yh.y.x.l))
 print(tail(yh.y.x.l))
-
-print(n)
-print(sum(yh.y.x.l[, 2]))
+print(sprintf('%i out of %i samples have label = 1', ny, n))
 
 x.range <- c(-3*stdx, 3*stdx)
 x.nn <- 60
@@ -70,10 +70,24 @@ plot.pwco.1d(rep.y, xrange = x.range, ytyp = 1, dt = 1, FisherInfo = TRUE)
 # next add to plot the true hazard in red
 xg <- seq(from = x.range[1], to = x.range[2], len = 200)
 lines(x = xg, y = lx(xg), col = 'red', lwd = 4)
-# and show base hazard as horizontal line
-bhzrd <- sum(yh.y.x.l[, 2]) / sum(yh.y.x.l[, 4])
-lines(x = c(min(xg), max(xg)), y = c(1, 1) * bhzrd, col = 'black', lwd = 2, lty = 3)
 
+# 'rigorous' baseline calculation (using only a single 'bias feature' made of ones)
+opt.1 <- opt.loss.ell2(
+  lghfunc.xentlambda,
+  yh.y.x.l[, 2], 
+  as.matrix(array(1, n)), 
+  w = yh.y.x.l[, 4],
+  ell2 = 0)  # as.matrix(0)
+bhzrd.1 <- log(1 + exp(opt.1$beta)) / 1
+# 'approximate quick' baseline calculation
+bhzrd.2 <- - (1 / mean(yh.y.x.l[, 4])) * log(1 - mean(yh.y.x.l[, 2]))
+# and show base hazard as horizontal line
+lines(x = c(min(xg), max(xg)), y = rep(bhzrd.1, 2), col = 'black', lwd = 2, lty = 3)
+lines(x = c(min(xg), max(xg)), y = rep(bhzrd.2, 2), col = 'black', lwd = 2, lty = 4)
+
+print(c(bhzrd.1, bhzrd.2))
+
+#
 # TODO: 
 # Next automatically obtain a good ell2 regularization value 
 # foreach-based CV example !

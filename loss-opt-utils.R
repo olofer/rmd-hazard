@@ -130,7 +130,8 @@ opt.loss.ell2 <- function(
   stopifnot(eptol >= 0)
   stopifnot(maxiter > 0)
 
-  if (length(ell2) == 1) ell2 <- array(ell2, m)  # auto-expand scalar
+  if (length(ell2) == 1 && m > 1) ell2 <- array(ell2, m)  # auto-expand scalar, if needed
+
   if (is.matrix(ell2)) {
     stopifnot(ncol(ell2) == m && nrow(ell2) == m)
   } else {
@@ -184,7 +185,7 @@ opt.loss.ell2 <- function(
     if (is.done && !stop.hess) break  # if hessian is to be returned proceed ...
     Z <- apply(X, 2, `*`, lgh$hess)
     if (is.done) break # .. then stop
-    if (is.matrix(ell2)) {
+    if (is.matrix(ell2) || length(ell2) == 1) {
       H <- (1/n) * (t(Z) %*% X) + ell2
     } else {
       H <- (1/n) * (t(Z) %*% X) + diag(ell2)
@@ -201,7 +202,7 @@ opt.loss.ell2 <- function(
     obj = obj.tot[1:kk],
     obj.fit = obj.fit[1:kk],
     gnorm = gnorm[1:kk],
-    beta.log = ifelse(beta.iter, beta.log[1:kk, ], NA),
+    beta.log = if(beta.iter) beta.log[1:kk, ] else NA,
     grad = if (stop.grad) gvec else NA,
     hess = if(stop.hess) { t(Z) %*% X } else { NA }
     )
@@ -246,7 +247,7 @@ opt.loss.ell2.pwco.1d <- function(
     X[, ii] <- ifelse(x > xg[ii] & x <= xg[ii + 1], 1, 0)
   }
   if (!is.null(yreg)) {
-    # TODO: might need better options for setting the interval based prior observations
+    # TODO: might need extended & improved options for setting the interval based prior observations
     # "prior observations" / useful to maintain reasonable estimates even when there are very few y = 1 labels
     stopifnot(length(yreg) == 1)
     if (yreg >= 0 && yreg <= 1) {
@@ -254,12 +255,7 @@ opt.loss.ell2.pwco.1d <- function(
       yadd <- array(yreg, nn)
     } else {
       # special auto-tune based on "average intensity"
-      if (!is.null(w)) {
-        tmp <- sum(y) / sum(w)
-        yadd <- array(1 - exp(-tmp * mean(w)), nn)
-      } else {
-        yadd <- array(1 - exp(-mean(y)), nn)
-      }
+      yadd <- array(mean(y), nn)
     }
     Xadd <- diag(array(1, nn))
     X <- rbind(X, Xadd)
@@ -312,6 +308,14 @@ opt.loss.ell2.pwco.1d <- function(
   }
   # Return list of return lists (1 per ell2.vec element)
   opt.list
+}
+
+#
+# K-fold CV tuner for selection of reasonable ell2 parameter value given a dataset.
+# It will be parallelized if the foreach environment is specified (outside of this function)
+#
+auto.pwco.1d <- function(y, x, w = NULL, xrange = NULL) {
+  return(NA)
 }
 
 #
@@ -381,7 +385,3 @@ plot.pwco.1d <- function(
   }
   return(nsols)
 }
-
-#
-# 2) Develop a CV training routine that works within foreach smoothly
-#
