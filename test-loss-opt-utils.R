@@ -50,7 +50,7 @@ print(sprintf('%i out of %i samples have label = 1', ny, n))
 x.range <- c(-3*stdx, 3*stdx)
 x.nn <- 60
 
-ell.vec <- 2 ^ seq(from = -7, to = 7, len = 60) #(-7:7)
+ell.vec <- 2 ^ seq(from = -8, to = 6, len = 60) #(-7:7)
 
 # Next setup the "inverse problem" to get function lx(x) from the dataset 
 # NOTE: with few observations; better results are obtained with true prob labels
@@ -72,6 +72,17 @@ rep.y.sel <- auto.pwco.1d.post(rep.y)
 lambda.best <- ell.vec[rep.y.sel$idx.min]
 print(sprintf('lambda(*) = %e', lambda.best))
 
+pdf('test-out-select.pdf')
+plot(
+  x = log(ell.vec), y = rep.y.sel$nll.post,
+  xlab = 'log(lambda)', ylab = 'NLL posterior proxy'
+  )
+lines(
+  x = log(c(lambda.best, lambda.best)),
+  y = c(min(rep.y.sel$nll.post), max(rep.y.sel$nll.post)),
+  col = 'blue', lwd = 2, lty  = 4)
+dev.off()
+
 #print(rep.y.sel)
 
 rep.y.1 <- opt.loss.ell2.pwco.1d(
@@ -87,8 +98,9 @@ rep.y.1 <- opt.loss.ell2.pwco.1d(
   warm.restart = TRUE)
 
 # Produce a plot of the solution family (different reg. parameters)
-
 #plot.pwco.1d(rep.y, xrange = x.range, ytyp = 1, dt = 1, FisherInfo = TRUE)
+
+pdf('test-out-estim.pdf')
 
 plot.pwco.1d(rep.y.1, xrange = x.range, ytyp = 1, dt = 1, FisherInfo = TRUE)
 # next add to plot the true hazard in red
@@ -109,5 +121,7 @@ bhzrd.2 <- - (1 / mean(yh.y.x.l[, 4])) * log(1 - mean(yh.y.x.l[, 2]))
 # and show base hazard as horizontal line
 lines(x = c(min(xg), max(xg)), y = rep(bhzrd.1, 2), col = 'black', lwd = 2, lty = 3)
 lines(x = c(min(xg), max(xg)), y = rep(bhzrd.2, 2), col = 'black', lwd = 2, lty = 4)
+
+dev.off()
 
 print(c(bhzrd.1, bhzrd.2))
