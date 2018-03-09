@@ -204,8 +204,24 @@ opt.loss.ell2 <- function(
     gnorm = gnorm[1:kk],
     beta.log = if(beta.iter) beta.log[1:kk, ] else NA,
     grad = if (stop.grad) gvec else NA,
-    hess = if(stop.hess) { t(Z) %*% X } else { NA }
+    hess = if(stop.hess) { t(Z) %*% X } else { NA },
+    samp.size = n 
     )
+}
+
+# Squared Exponential Kernel (covariance hyper-parametrization)
+make.SE.kernel <- function(x, ell, a = 1.0) {
+  m <- length(x)
+  stopifnot(m >= 1)
+  K <- array(NA, c(m, m))
+  stopifnot(length(ell) == 1 && ell > 0)
+  for (rr in 1:m) {
+    for (cc in 1:m) {
+      drc <- x[rr] - x[cc]
+      K[rr, cc] <- exp(-drc * drc / (2 * ell * ell))
+    }
+  }
+  return(a * K)
 }
 
 #
@@ -264,26 +280,31 @@ opt.loss.ell2.pwco.1d <- function(
       wadd <- array(mean(w), nn)
       w <- c(w, wadd)
     }
-#    warning('yreg argument not handled')
   }
   nell <- length(ell2.vec)
   stopifnot(nell > 0)
   stopifnot(all(ell2.vec >= 0))
-  stopifnot(regtyp == 0 || regtyp == 1 || regtyp == 2) 
+  stopifnot(regtyp == 0 || regtyp == 1 || regtyp == 2 || regtyp == 3) 
   if (regtyp == 1) {
     D.op <- array(0, c(nn - 1, nn))
     for (ii in 1:nrow(D.op)) {
       D.op[ii, ii:(ii+1)] <- c(-1, 1);
     }
+    L <- t(D.op) %*% D.op
   } else if (regtyp == 2) {
     D.op <- array(0, c(nn - 2, nn))
     for (ii in 1:nrow(D.op)) {
       D.op[ii, ii:(ii+2)] <- c(-1, 2, -1);
     }
+    L <- t(D.op) %*% D.op
+  } else if (regtyp == 3) {
+    # This is a special trick setup using a "matched" squared exponential Kernel
+    # (the length-scale is 'tuned' to match regtyp == 2, but can be seen as a proper prior covariance)
+    K.apx <- make.SE.kernel(1:nn, ell = 0.800505, a = 0.141782)
+    L <- solve(K.apx)  # NOTE: this does not seem to work so well currently though
   } else {
-    D.op <- diag(array(1, nn))
+    L <- diag(array(1, nn))
   }
-  L <- t(D.op) %*% D.op  # reg. matrix to be scaled by lambda >= 0
   opt.list <- list() 
   for (ii in 1:nell) {
     # here estimate one model per lambda, with optional warm-starting
@@ -305,17 +326,34 @@ opt.loss.ell2.pwco.1d <- function(
     if (!opt.list[[ii]]$is.converged) {
       warning(sprintf('not converged for ell2 = %e', ell2.vec[ii]))
     }
+    # Now add a named field to the returned list for posterior likelihood interpretation
+    # based on the L matrix provided
+    opt.list[[ii]] <- c(opt.list[[ii]], Jprior = -(nn / 2) * log(ell2.vec[ii]) )
   }
   # Return list of return lists (1 per ell2.vec element)
-  opt.list
+  return(opt.list)
 }
 
-#
-# K-fold CV tuner for selection of reasonable ell2 parameter value given a dataset.
-# It will be parallelized if the foreach environment is specified (outside of this function)
-#
-auto.pwco.1d <- function(y, x, w = NULL, xrange = NULL) {
-  return(NA)
+# Recover a total "posterior" likelihood path that can be used to pick 
+# the "best" penalty parameter (presumably)
+auto.pwco.1d.post <- function(ol) {
+  stopifnot(is.list(ol))
+  nsols <- length(ol)
+  stopifnot(nsols >= 1)
+  m <- length(ol[[1]]$beta)
+  n <- ol[[1]]$samp.size  # assumed (n, m) are the same for all
+  nll.post <- array(NA, nsols)
+  nll.part <- array(NA, c(nsols, 3))
+  for (ii in 1:nsols) {
+    kmax <- ol[[ii]]$iters
+    Jreg <- ol[[ii]]$obj[kmax] - rep.y[[ii]]$obj.fit[kmax]
+    Jpri <- rep.y[[ii]]$Jprior 
+    Lfit <- rep.y[[ii]]$obj.fit[kmax] * n
+    nll.post[ii] <- Lfit + Jreg + Jpri
+    nll.part[ii, ] <- c(Lfit, Jreg, Jpri)
+  }
+  idx.min <- which.min(nll.post)
+  return(list(idx.min = idx.min, nll.post = nll.post, nll.part = nll.part))
 }
 
 #

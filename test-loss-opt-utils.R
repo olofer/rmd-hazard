@@ -1,5 +1,5 @@
 #
-# Test / demonstration of codes for estiamting smooth univariate curve
+# Test / demonstration of codes for estimating smooth univariate curve
 # logistic regression (mainly for hazards) with optional Fisher Information
 # "uncertainty" indication and enforced "prior base hazard" (also optional) 
 #
@@ -50,6 +50,8 @@ print(sprintf('%i out of %i samples have label = 1', ny, n))
 x.range <- c(-3*stdx, 3*stdx)
 x.nn <- 60
 
+ell.vec <- 2 ^ seq(from = -7, to = 7, len = 60) #(-7:7)
+
 # Next setup the "inverse problem" to get function lx(x) from the dataset 
 # NOTE: with few observations; better results are obtained with true prob labels
 # (which are typically unknown)
@@ -59,14 +61,36 @@ rep.y <- opt.loss.ell2.pwco.1d(
   w = yh.y.x.l[, 4],
   nn = x.nn,
   xrange = x.range,
-  ell2.vec = c(1/128, 1/64, 1/32, 1/16, 1/8, 1/4, 1/2, 1, 2, 4, 8, 16, 32, 64, 128),
+  ell2.vec = ell.vec, 
+  regtyp = 2,
+  yreg = -1,  # not in interval [0, 1] and not null means auto-tune (regularize towards baseline)
+  lghfunc = lghfunc.xentlambda,
+  warm.restart = TRUE)
+
+# Try to select the 'best' parameter lambda.best
+rep.y.sel <- auto.pwco.1d.post(rep.y)
+lambda.best <- ell.vec[rep.y.sel$idx.min]
+print(sprintf('lambda(*) = %e', lambda.best))
+
+#print(rep.y.sel)
+
+rep.y.1 <- opt.loss.ell2.pwco.1d(
+  yh.y.x.l[, 2],  # col 2: outcome target {0, 1}, col 1: true prob values in [0, 1]
+  yh.y.x.l[, 3],
+  w = yh.y.x.l[, 4],
+  nn = x.nn,
+  xrange = x.range,
+  ell2.vec = lambda.best, 
   regtyp = 2,
   yreg = -1,  # not in interval [0, 1] and not null means auto-tune (regularize towards baseline)
   lghfunc = lghfunc.xentlambda,
   warm.restart = TRUE)
 
 # Produce a plot of the solution family (different reg. parameters)
-plot.pwco.1d(rep.y, xrange = x.range, ytyp = 1, dt = 1, FisherInfo = TRUE)
+
+#plot.pwco.1d(rep.y, xrange = x.range, ytyp = 1, dt = 1, FisherInfo = TRUE)
+
+plot.pwco.1d(rep.y.1, xrange = x.range, ytyp = 1, dt = 1, FisherInfo = TRUE)
 # next add to plot the true hazard in red
 xg <- seq(from = x.range[1], to = x.range[2], len = 200)
 lines(x = xg, y = lx(xg), col = 'red', lwd = 4)
@@ -78,6 +102,7 @@ opt.1 <- opt.loss.ell2(
   as.matrix(array(1, n)), 
   w = yh.y.x.l[, 4],
   ell2 = 0)  # as.matrix(0)
+
 bhzrd.1 <- log(1 + exp(opt.1$beta)) / 1
 # 'approximate quick' baseline calculation
 bhzrd.2 <- - (1 / mean(yh.y.x.l[, 4])) * log(1 - mean(yh.y.x.l[, 2]))
@@ -86,9 +111,3 @@ lines(x = c(min(xg), max(xg)), y = rep(bhzrd.1, 2), col = 'black', lwd = 2, lty 
 lines(x = c(min(xg), max(xg)), y = rep(bhzrd.2, 2), col = 'black', lwd = 2, lty = 4)
 
 print(c(bhzrd.1, bhzrd.2))
-
-#
-# TODO: 
-# Next automatically obtain a good ell2 regularization value 
-# foreach-based CV example !
-#
