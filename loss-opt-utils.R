@@ -27,12 +27,15 @@ lghfunc.ell2 <- function(y, f, w = NULL) {
 }
 
 lghfunc.xentropy <- function(y, f, w = NULL) {
-  stopifnot(is.null(w))
   z <- 1 / (1 + exp(-f))
   l <- -(y * log(z) + (1 - y) * log(1 - z))
   g <- z - y
   h <- z * (1 - z)
-  list(loss = l, grad = g, hess = h)
+  if (!is.null(w)) {
+    list(loss = l * w, grad = g * w, hess = h * w)
+  } else {
+    list(loss = l, grad = g, hess = h)
+  }
 }
 
 # NOTE: xentlambda degenerates to xentropy for unit weights w (or NULL)
@@ -51,6 +54,29 @@ lghfunc.xentlambda <- function(y, f, w = NULL) {
   }
   list(loss = l, grad = g, hess = h)
 }
+
+#
+# Majorization type quantile regression loss function
+# with "regularization" epsilon; q = 1/2 corresponds
+# to ell1-regression
+#
+lghfunc.qregr <- function(y, f, w = NULL, q = 1/2, ep = 1e-2) {
+  e <- y - f
+  l <- ifelse(e < 0, (q - 1) * e, q * e)
+  ae <- abs(e)
+  if (ep > 0) l <- l - (ep / 2) * log(ep + ae) 
+  g <- ((q - 0.5) + 0.5 * e / (ep + ae)) * (-1)
+  h <- 0.5 / (ep + ae)
+  if (!is.null(w)) {
+    list(loss = l * w, grad = g * w, hess = h * w)
+  } else {
+    list(loss = l, grad = g, hess = h)
+  }
+}
+
+#
+# TODO: implement Huberized/majorized squared error loss
+#
 
 #
 # Fit function on the form
