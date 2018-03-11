@@ -27,10 +27,11 @@ This `rmarkdown` document was built with `R` version `r getRversion()`.
 rmarkdown::render('random-hazard.Rmd')
 ```
 
-This notebook illustrates some interesting relations which may or may not be useful when dealing with dynamical systems and survival analysis. In what follows, SDE and PDE are abbreviations for Stochastic and Partial Differential Equations. See the source file `random-hazard-utils.R` for additional required notebook sources (PDE related subprograms and first-visit counting statistics utilities) which are not explicitly shown in the notebook.
+This notebook illustrates some interesting relations which may or may not be useful when dealing with dynamical systems and survival analysis. In what follows, SDE and PDE are abbreviations for Stochastic and Partial Differential Equations. See the source file `random-hazard-utils.R` for additional required notebook sources (PDE related subprograms and first-visit counting statistics utilities) which are not explicitly shown in the notebook. See also file `loss-opt-utils.R` for further code which is used for function approximation (in the final section of this noteboook).
 
 ```{r setup}
 source('random-hazard-utils.R')  # additional source code
+source('loss-opt-utils.R')  # even more extra code
 
 library(survival)
 library(foreach)
@@ -314,12 +315,15 @@ Given a set of path samples, how can the conditional survival be estimated? How 
 The previous section suggested that it is possible to approximate the PDE solution for the conditional survival function by taking many (right-censored / timed-out) SDE samples for every initial condition $x$ (in some preset interval) and then applying the Kaplan-Meier estimator. This works but seems wasteful because a sample path in fact visits more regions in space than only the initial point. A single sample path should therefore provide solution information for several space-time points. This subsection will show one way to do this.
 
 ```{r further-note-to-self, include=FALSE, eval=FALSE}
-# - Write this with nice R code such that it parallelizes the path sampling and aggregation steps.
-#     - Producer / Consumer type of arrangement?
-# - Do it such a way as it is explicitly clear that there is a convergence towards the PDE solution as num.samples goes up...
+# - Show that there is a convergence towards the PDE solution as num.samples goes up...
 # - Hazard function estimation should be illustrated by special univariate smooth curve logistic regression
+#     - do with special LR code that warm-starts for sequence of lambdas
+#     - also needs special option for the synthetic half observations...
+#     - and return the hessian at convergence ... and the generalized DOF too!
+#     - code like the optwbross2.m file but with IC option also
 # - Maybe also try a full SGD "push through" logistic regression for the joint u(t, x) estimation ...
 # - This will be illustrated here using Gradient Boosting Machines (GBMs) with the `xgboost` package.
+# - log.reg. & conclude rmd with survival mapping using the estimated hazard
 ```
 
 Here is a way of sampling the survival function PDE solution over a domain using different SDEs that all start with initial condition zero.
@@ -358,20 +362,103 @@ image(tsrv, mid.xsrv, t(srv.unif),
   main = 'Sampled Prob[T > t | x] (uniform IC)', col = viridis(50))
 ```
 
-**YET TO BE FINALIZED** 
+In fact the quality of the sampled PDE approximations at a specific point will depend on how many samples are obtained at that point. This number will be a function of the initial condition, but also the dynamical system potential function, the killing rate (hazard) function, and the diffusion coefficient (the temperature). In this particular case the initial condition distribution appears to have a weak effect on the overall PDE approximation quality.
 
 ### Hazard function estimation
 
 It turns out that it is possible to formulate a supervised learning problem directly for the hazard function. In the above hazard model it is implied that the survival or death at each time-step is an independent binary outcome of a trial with a exponential random variate where the parameter is covariate-dependent. If the outcome is death/event, then the path is terminated. Otherwise the path proceeds to the next step. And so on. As a result each path can be encoded with outcome labels in one of two ways: (i) all outcome labels are zero if the path is right-censored and (ii) all outcome labels are zero except the last label which is one (terminating event observation).
 
-Therefore if we use cross-entropy as the loss function this setup is equivalent to maximum-likelihood estimation of the hazard function. It would seem we have an extremely imbalanced classification problem but this is illusory. Each individual trial event probability is just very small (for small $dt$).
+Therefore if we use cross-entropy as the loss function this setup is equivalent to maximum-likelihood estimation of the hazard function. It would seem we have an extremely imbalanced classification problem but this is illusory. Each individual trial event probability is just very small (for small $dt$). Denote by $y_i$ the event outcome (zero or one) of a sample at time $i$, and let $x_i$ be the system state at the same time $i$. The full set $(y_i, x_i)$ for all observed $i$ as described above constitute a training set to be used with the objective (loss) function
 
-**YET TO BE DONE** 
+$$\mathrm{nll} = - \sum_{i=1}^n \left[ y_i \log(z_i) + (1 - y_i)\log(1 - z_i) \right]$$ 
+
+where $z_i$ is the probability to be learned using function approximation tools. One flexible approach is to relate the probability to the hazard as $z_i=1-e^{-h_i\Delta_i}$; and then let the point hazard $h_i$ be parameterized by an unbounded function $f_i$ so that $h_i = (1/\Delta_i)\ln(1+e^{f_i})$. See file `loss-opt-utils.R` for (too many) details. This even allows the use of variable time-steps $\Delta_i$ special observation weighting schemes.
+
+```{r debug-dump-init, include=FALSE}
+# Write data chunk to file after sampling (development purposes)
+dump.dev.data.yx <- TRUE
+```
+
+```{r generate-YX-blob}
+# Re-generate a new set of path samples but store all of them in a huge stack
+# with two columns: y and x, but downsample the trajectory 10x to save resources
+dfact <- 10
+YX <- foreach (i = 1:num.FKC.samples, .combine = 'rbind',
+  .multicombine = FALSE, .inorder = FALSE) %doop% {
+  sde.result <- Euler.Maruyama.HAZ(
+    SDE.parameters, dt = sde.dt, tmax = time.out, x0 = 0, h.x)
+  tmp <- as.vector(
+    filter(sde.result$x, rep(1/dfact, dfact),
+      'convolution', sides = 1)
+    )
+  tmp <- tmp[seq(from = dfact, to = length(sde.result$t), by = dfact)]
+  yi <- array(0, length(tmp))
+  if (sde.result$event) yi[length(tmp)] <- 1
+  cbind(yi, tmp)
+}
+```
+
+```{r print-summaries, echo=FALSE}
+stopifnot(ncol(YX) == 2)  # assertion
+print(sprintf('nrow(YX) = %i (downsampled %f X)', nrow(YX), dfact))
+print(sprintf('sum(y) = %f', sum(YX[, 1])))
+# This is how "imbalanced" we are!
+print(sprintf('pos. label fraction = %e', sum(YX[, 1]) / nrow(YX)))
+```
+
+```{r debug-dump-close, include=FALSE}
+# Optional write to disk
+if (dump.dev.data.yx) save(YX, sde.dt, h.x, dfact, file = 'dev-yx-dump.RData')
+```
+
+Notice that the trajectories were downsampled by a factor `r dfact`x. So in a sense the original learning problem was even more imbalanced; but the more appropriate interpretation is to see the decimation as a re-scaling of the time parameter.
+
+To illustrate the recovery of the hazard function we here fit a smooth function and select the level of regularization with a technique called Empirical Bayes (or maximum likelihood type 2). Note that this is not the same as cross validation (but it is another model selection tool). No more will be written about that in this `R` markdown document. Hazard estimation results follow below. 
+
+```{r hazard-recovery}
+# Define range and granularity of smooth funtion estimate
+x.range <- c(-6, 6)
+x.nn <- 60
+# Regularization parameter trial value vector
+ell.vec <- 2 ^ seq(from = -2, to = -14, len = 13)
+# Call logistic regression type code
+rep.y <- opt.loss.ell2.pwco.1d(
+  YX[, 1], YX[, 2], w = NULL,
+  nn = x.nn, xrange = x.range,
+  ell2.vec = ell.vec, regtyp = 2,
+  yreg = -1,  # pseudo-observation auto-tune (set to baseline)
+  lghfunc = lghfunc.xentlambda, warm.restart = TRUE)
+# Get the best parameter (Empirical Bayes)
+rep.y.sel <- auto.pwco.1d.post(rep.y)
+lambda.best <- ell.vec[rep.y.sel$idx.min]
+print(sprintf('lambda(*) = %e', lambda.best))
+# Re-estimate the best curve
+rep.y.1 <- opt.loss.ell2.pwco.1d(
+  YX[, 1], YX[, 2], w = NULL, nn = x.nn,
+  xrange = x.range, ell2.vec = lambda.best, regtyp = 2,
+  yreg = -1, lghfunc = lghfunc.xentlambda)
+# Plot the estimate and the true underlying hazard
+delta_t <- sde.dt * dfact
+plot.pwco.1d(rep.y.1, xrange = x.range, ytyp = 1, 
+  dt = delta_t, FisherInfo = TRUE, lwd = 3)
+xg <- seq(from = x.range[1], to = x.range[2], len = 200)
+lines(x = xg, y = h.x(xg), col = 'red', lwd = 3)
+# Get the baseline hazard and plot it too
+opt.1 <- opt.loss.ell2(lghfunc.xentlambda, YX[, 1], 
+  as.matrix(array(1, nrow(YX))), w = NULL, ell2 = 0)
+bhzrd.1 <- log(1 + exp(opt.1$beta)) / delta_t
+lines(x = c(min(x.range), max(x.range)), y = rep(bhzrd.1, 2),
+  col = 'black', lwd = 2, lty = 3)
+# Insert a legend
+legend('top', c('Estimate', 'Truth', 'Baseline'),
+  text.col = c('blue', 'red', 'black'))
+```
 
 ## References
 
 1. C. Gardiner, *Stochastic Methods*, 4th edition, Springer, 2009
 2. J. F. Lawless, *Statistical Models and Methods for Lifetime Data*, Wiley, 2003
+3. K. Murphy, *Machine Learning: a probabilistic perspective*, MIT Press, 2012
 
 
 ```{r stop-cluster, include=FALSE, eval=TRUE}
