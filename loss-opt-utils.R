@@ -79,6 +79,29 @@ lghfunc.qregr <- function(y, f, w = NULL, q = 1/2, ep = 1e-2) {
 #
 
 #
+# Aux. function that breaks up the matrix calculation 
+#   Y <- t(X) %*% D %*% X
+# where D is diagonal of size n and X has size n-by-m
+# into chunks of size nc along rows of X. This can save
+# resources (memory)
+#
+aux.trxdx <- function(X, d, nc) {
+  n <- nrow(X)
+  stopifnot(length(d) == n)
+  m <- ncol(X)
+  stopifnot(nc >= 1)
+  Y <- array(0, c(m, m))  # aggregate results to this matrix
+  rr <- 1
+  while (rr <= n) {
+    rr_max <- rr + nc - 1  # rows rr:rr_max makes the next chunk
+    if (rr_max > n) rr_max <- n
+    Y <- Y + t(apply(X[rr:rr_max, ], 2, `*`, d[rr:rr_max])) %*% X[rr:rr_max, ]
+    rr <- rr + nc
+  }
+  return(Y)
+}
+
+#
 # Fit function on the form
 #
 #   fhat = X %*% beta
@@ -126,7 +149,8 @@ opt.loss.ell2 <- function(
   maxiter = 100,
   beta.iter = FALSE,
   stop.grad = FALSE,
-  stop.hess = FALSE)  # return the "data hessian" (not the regularized loss hessian)
+  stop.hess = FALSE,
+  row.chunk.size = -1)
 {
   # First do some type-checking / documentation of intent
   stopifnot(is.function(lghfunc))
@@ -209,12 +233,20 @@ opt.loss.ell2 <- function(
     is.done <- (kk == maxiter) || is.converged
     kk <- kk + 1
     if (is.done && !stop.hess) break  # if hessian is to be returned proceed ...
-    Z <- apply(X, 2, `*`, lgh$hess)
-    if (is.done) break # .. then stop
-    if (is.matrix(ell2) || length(ell2) == 1) {
-      H <- (1/n) * (t(Z) %*% X) + ell2
+    if (row.chunk.size <= 0) {
+      #Z <- apply(X, 2, `*`, lgh$hess)
+      #H.dat <- (t(Z) %*% X)
+      H.dat <- (t(apply(X, 2, `*`, lgh$hess)) %*% X)
     } else {
-      H <- (1/n) * (t(Z) %*% X) + diag(ell2)
+      # This option can save some memory if needed
+      print('*** calling aux ***')
+      H.dat <- aux.trxdx(X, lgh$hess, row.chunk.size)
+    }    
+    if (is.done) break # .. then stop 
+    if (is.matrix(ell2) || length(ell2) == 1) {
+      H <- (1/n) * H.dat + ell2
+    } else {
+      H <- (1/n) * H.dat + diag(ell2)
     }
     stopifnot(nrow(H) == m && ncol(H) == m)
     # TODO: switchable methods: Cholesky, solve, QR; or explicitly the IRWLS "lookalike"
@@ -230,8 +262,9 @@ opt.loss.ell2 <- function(
     gnorm = gnorm[1:kk],
     beta.log = if(beta.iter) beta.log[1:kk, ] else NA,
     grad = if (stop.grad) gvec else NA,
-    hess = if(stop.hess) { t(Z) %*% X } else { NA },
-    samp.size = n 
+    hess = if(stop.hess) { H.dat } else { NA },
+    samp.size = n,
+    row.chunk = row.chunk.size
     )
 }
 
@@ -274,8 +307,10 @@ opt.loss.ell2.pwco.1d <- function(
   regtyp = 2,
   yreg = NULL,
   lghfunc = lghfunc.xentlambda,
-  warm.restart = FALSE)
+  warm.restart = FALSE,
+  talkative = FALSE)
 {
+  row.limit <- 2e6  # larger row counts are chunked by default
   n <- length(y)
   stopifnot(length(x) == n)
   if (!is.null(w)) {
@@ -314,13 +349,13 @@ opt.loss.ell2.pwco.1d <- function(
   if (regtyp == 1) {
     D.op <- array(0, c(nn - 1, nn))
     for (ii in 1:nrow(D.op)) {
-      D.op[ii, ii:(ii+1)] <- c(-1, 1);
+      D.op[ii, ii:(ii + 1)] <- c(-1, 1);
     }
     L <- t(D.op) %*% D.op
   } else if (regtyp == 2) {
     D.op <- array(0, c(nn - 2, nn))
     for (ii in 1:nrow(D.op)) {
-      D.op[ii, ii:(ii+2)] <- c(-1, 2, -1);
+      D.op[ii, ii:(ii + 2)] <- c(-1, 2, -1);
     }
     L <- t(D.op) %*% D.op
   } else if (regtyp == 3) {
@@ -333,6 +368,7 @@ opt.loss.ell2.pwco.1d <- function(
   }
   opt.list <- list() 
   for (ii in 1:nell) {
+    if (talkative) print(sprintf('@ %i / %i', ii, nell))
     # here estimate one model per lambda, with optional warm-starting
     # NOTE: warm start may only make sense if ell2.vec is sorted (but this is NOT checked for)
     if (ii > 1 && warm.restart && opt.list[[ii - 1]]$is.converged) {
@@ -348,13 +384,17 @@ opt.loss.ell2.pwco.1d <- function(
       ell2 = as.matrix(ell2.vec[ii] * L),
       beta.init = beta.init,
       eta = 1.0, eptol = 1e-10, maxiter = 100,
-      beta.iter = FALSE, stop.grad = TRUE, stop.hess = TRUE)
+      beta.iter = FALSE, stop.grad = TRUE, stop.hess = TRUE,
+      row.chunk.size = if (n < row.limit) -1 else row.limit)
     if (!opt.list[[ii]]$is.converged) {
       warning(sprintf('not converged for ell2 = %e', ell2.vec[ii]))
     }
     # Now add a named field to the returned list for posterior likelihood interpretation
     # based on the L matrix provided
-    opt.list[[ii]] <- c(opt.list[[ii]], Jprior = -(nn / 2) * log(ell2.vec[ii]) )
+    opt.list[[ii]] <- c(opt.list[[ii]], Jprior = -(nn / 2) * log(ell2.vec[ii]))
+    if (talkative) {
+      print(sprintf('did ell2 = %e (%i iters)', ell2.vec[ii], opt.list[[ii]]$iters))
+    }
   }
   # Return list of return lists (1 per ell2.vec element)
   return(opt.list)
@@ -391,7 +431,8 @@ plot.pwco.1d <- function(
   xrange = NULL,
   ytyp = 0,
   dt = NULL,
-  FisherInfo = FALSE) 
+  FisherInfo = FALSE,
+  lwd = 2) 
 {
   # ol is the returned list of lists from "opt.loss.ell2.pwco.1d" above
   stopifnot(is.list(ol))
@@ -420,7 +461,6 @@ plot.pwco.1d <- function(
     ylab <- 'hazard h'
     yfunc <- function(a) { log(1 + exp(a)) / dt }
   }
-  lwd <- 2
   col1 <- 'blue'
   if (nsols > 1) {
     require(viridis)
@@ -434,16 +474,16 @@ plot.pwco.1d <- function(
   if (FisherInfo && ('hess' %in% names(ol[[1]]))) {
     # Optionally add dashed lines for Fisher Information "error bars"
     stdb <- 1 / sqrt(diag(ol[[1]]$hess)) 
-    lines(x = xvec, y = yfunc(ol[[1]]$beta - stdb), col = col1, lty = 3, lwd = lwd - 1)
-    lines(x = xvec, y = yfunc(ol[[1]]$beta + stdb), col = col1, lty = 3, lwd = lwd - 1)
+    lines(x = xvec, y = yfunc(ol[[1]]$beta - stdb), col = col1, lty = 2, lwd = lwd - 1)
+    lines(x = xvec, y = yfunc(ol[[1]]$beta + stdb), col = col1, lty = 2, lwd = lwd - 1)
   }
   if (nsols > 1) {
     for (ii in 2:nsols) {
       lines(x = xvec, y = yfunc(ol[[ii]]$beta), lwd = lwd, col = coll[ii])
       if (FisherInfo && ('hess' %in% names(ol[[ii]]))) {
         stdb <- 1 / sqrt(diag(ol[[ii]]$hess)) 
-        lines(x = xvec, y = yfunc(ol[[ii]]$beta - stdb), col = coll[ii], lty = 3, lwd = lwd - 1)
-        lines(x = xvec, y = yfunc(ol[[ii]]$beta + stdb), col = coll[ii], lty = 3, lwd = lwd - 1)
+        lines(x = xvec, y = yfunc(ol[[ii]]$beta - stdb), col = coll[ii], lty = 2, lwd = lwd - 1)
+        lines(x = xvec, y = yfunc(ol[[ii]]$beta + stdb), col = coll[ii], lty = 2, lwd = lwd - 1)
       }
     }
   }

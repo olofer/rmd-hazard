@@ -1,5 +1,5 @@
 #
-# Test / demonstration of codes for estimating smooth univariate curve
+# Test / demonstration of codes for estimation of smooth univariate curve
 # logistic regression (mainly for hazards) with optional Fisher Information
 # "uncertainty" indication and enforced "prior base hazard" (also optional) 
 #
@@ -113,7 +113,7 @@ opt.1 <- opt.loss.ell2(
   yh.y.x.l[, 2], 
   as.matrix(array(1, n)), 
   w = yh.y.x.l[, 4],
-  ell2 = 0)  # as.matrix(0)
+  ell2 = 0)
 
 bhzrd.1 <- log(1 + exp(opt.1$beta)) / 1
 # 'approximate quick' baseline calculation
