@@ -454,11 +454,13 @@ legend('top', c('Estimate', 'Truth', 'Baseline'),
   text.col = c('blue', 'red', 'black'))
 ```
 
+Notice the (approximate) uncertainty indicators (dashed lines) in the above plot. The corresponding interval grows as the edges in the plot are approached. This is consistent with the fact that less time is observed near the edges (combined effect of potential well and hazard landscape). Each additional/missing event observation will have a large effect near the edges compared to the middle of the plot where the particle typically hovers.
+
 ## References
 
 1. C. Gardiner, *Stochastic Methods*, 4th edition, Springer, 2009
 2. J. F. Lawless, *Statistical Models and Methods for Lifetime Data*, Wiley, 2003
-3. K. Murphy, *Machine Learning: a probabilistic perspective*, MIT Press, 2012
+3. K. P. Murphy, *Machine Learning: a probabilistic perspective*, MIT Press, 2012
 
 
 ```{r stop-cluster, include=FALSE, eval=TRUE}

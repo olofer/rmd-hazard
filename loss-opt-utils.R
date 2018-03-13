@@ -75,8 +75,19 @@ lghfunc.qregr <- function(y, f, w = NULL, q = 1/2, ep = 1e-2) {
 }
 
 #
-# TODO: implement Huberized/majorized squared error loss
+# Huber loss function with non-zero hessian everywhere due to 
+# majorization when abs(y - f) > d
 #
+lghfunc.huber <- function(y, f, w = NULL, d = 0.1) {
+  list(loss = NA, grad = NA, hess = NA)
+}
+
+#
+# Pseudo-Huber objective function; another version of "robustified" L2 regression
+#
+lghfunc.phuber <- function(y, f, w = NULL, d = 0.1) {
+  list(loss = NA, grad = NA, hess = NA)
+}
 
 #
 # Aux. function that breaks up the matrix calculation 
@@ -487,5 +498,5 @@ plot.pwco.1d <- function(
       }
     }
   }
-  return(nsols)
+#  return(nsols)
 }
