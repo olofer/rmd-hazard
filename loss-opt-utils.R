@@ -76,17 +76,36 @@ lghfunc.qregr <- function(y, f, w = NULL, q = 1/2, ep = 1e-2) {
 
 #
 # Huber loss function with non-zero hessian everywhere due to 
-# majorization when abs(y - f) > d
+# majorization when abs(y - f) > d (still untested)
 #
 lghfunc.huber <- function(y, f, w = NULL, d = 0.1) {
-  list(loss = NA, grad = NA, hess = NA)
+  e <- f - y
+  ae <- abs(e)
+  l <- ifelse(ae < d, 0.5 * e ^ 2, ae * d - 0.5 * d * d)
+  g <- ifelse(ae < d, e, d * sign(e))  #ifelse(ae < d, e, (d / ae) * e)
+  h <- ifelse(ae < d, 1, d / ae)
+  if (!is.null(w)) {
+    list(loss = l * w, grad = g * w, hess = h * w)
+  } else {
+    list(loss = l, grad = g, hess = h)
+  }
 }
 
 #
 # Pseudo-Huber objective function; another version of "robustified" L2 regression
-#
+# (still untested; still not implemented)
 lghfunc.phuber <- function(y, f, w = NULL, d = 0.1) {
-  list(loss = NA, grad = NA, hess = NA)
+  e <- f - y
+  ed2 <- (e / d) ^ 2
+  sqrt.1ped2 <- sqrt(1 + ed2)
+  l <- d * d * (sqrt.1ped2 - 1)
+  g <- e / sqrt.1ped2
+  h <- (-1) * e / (d * d * sqrt.1ped2 ^ 3)
+  if (!is.null(w)) {
+    list(loss = l * w, grad = g * w, hess = h * w)
+  } else {
+    list(loss = l, grad = g, hess = h)
+  }
 }
 
 #
