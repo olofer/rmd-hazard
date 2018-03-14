@@ -76,7 +76,8 @@ lghfunc.qregr <- function(y, f, w = NULL, q = 1/2, ep = 1e-2) {
 
 #
 # Huber loss function with non-zero hessian everywhere due to 
-# majorization when abs(y - f) > d (still untested)
+# majorization when abs(y - f) > d
+# (still untested)
 #
 lghfunc.huber <- function(y, f, w = NULL, d = 0.1) {
   e <- f - y
@@ -93,7 +94,8 @@ lghfunc.huber <- function(y, f, w = NULL, d = 0.1) {
 
 #
 # Pseudo-Huber objective function; another version of "robustified" L2 regression
-# (still untested; still not implemented)
+# (still untested)
+#
 lghfunc.phuber <- function(y, f, w = NULL, d = 0.1) {
   e <- f - y
   ed2 <- (e / d) ^ 2

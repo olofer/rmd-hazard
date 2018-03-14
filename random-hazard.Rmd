@@ -27,7 +27,7 @@ This `rmarkdown` document was built with `R` version `r getRversion()`.
 rmarkdown::render('random-hazard.Rmd')
 ```
 
-This notebook illustrates some interesting relations which may or may not be useful when dealing with dynamical systems and survival analysis. In what follows, SDE and PDE are abbreviations for Stochastic and Partial Differential Equations. See the source file `random-hazard-utils.R` for additional required notebook sources (PDE related subprograms and first-visit counting statistics utilities) which are not explicitly shown in the notebook. See also file `loss-opt-utils.R` for further code which is used for function approximation (in the final section of this noteboook).
+This notebook illustrates some interesting relations which may or may not be useful when dealing with dynamical systems and survival analysis. In what follows, SDE and PDE are abbreviations for Stochastic and Partial Differential Equations. See the source file `random-hazard-utils.R` for additional required notebook sources (PDE related subprograms and first-visit counting statistics utilities) which are not explicitly shown in the notebook. See also file `loss-opt-utils.R` for further code which is used for function approximation (in the final section of this notebook).
 
 ```{r setup}
 source('random-hazard-utils.R')  # additional source code
@@ -376,7 +376,7 @@ where $z_i$ is the probability to be learned using function approximation tools.
 
 ```{r debug-dump-init, include=FALSE}
 # Write data chunk to file after sampling (development purposes)
-dump.dev.data.yx <- TRUE
+dump.dev.data.yx <- FALSE
 ```
 
 ```{r generate-YX-blob}
