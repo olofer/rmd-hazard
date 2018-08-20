@@ -1,11 +1,15 @@
 # rmd-hazard
 
-R markdown story about survival analysis and stochastic dynamical systems.
+Practical computational stories about survival analysis and stochastic dynamical systems.
 
-## R markdown
+## Pregenerated documents
 
-The document is reproducible from within the `R` environment by calling the `rmarkdown::render` function.
+The documents are reproducible from within the `R` environment by calling the `rmarkdown::render` function.
 
-## Preview
+1. [random-hazard.Rmd](http://htmlpreview.github.com/?https://github.com/olofer/rmd-hazard/blob/master/sample-doc/random-hazard.html).
 
-It is possible to pre-view what to expect by following [this link](http://htmlpreview.github.com/?https://github.com/olofer/rmd-hazard/blob/master/sample-doc/random-hazard.html).
+    Particle moving in a potential landscape subject to a background hazard. Time-homogeneous setting.
+
+2. [random-hazardous-value.Rmd](http://htmlpreview.github.com/?https://github.com/olofer/rmd-hazard/blob/master/sample-doc/random-hazardous-value.html).
+
+    More general path integral evaluation. Time-inhomogeneous setting. 

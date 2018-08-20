@@ -1,0 +1,543 @@
+---
+title: "The expected value of a stochastic trajectory in a hazardous landscape"
+author: K Erik J Olofsson
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  html_document:
+    smart: false
+    toc: true
+    toc_float: true
+---
+
+```{r build-example, eval=FALSE}
+# Reproduce this document as follows.
+rmarkdown::render('random-hazardous-value.Rmd')
+```
+
+```{r load-libraries, echo=FALSE}
+suppressMessages(library(foreach))
+suppressMessages(library(viridis))
+suppressMessages(library(fields))
+
+num.workers <- 2
+`%doop%` <- ifelse(num.workers > 1, `%dopar%`, `%do%`)
+if (num.workers > 1) {
+  suppressMessages(library(doParallel))
+  this.clus <- makeCluster(num.workers)
+  registerDoParallel(this.clus)
+} else {
+  this.clus <- NULL
+}
+
+source('random-hazard-utils.R')
+source('random-value-utils.R')
+source('dynp-value-utils.R')
+
+```
+
+# Problem statement
+
+We are interested in finding the expected value $u(x,t)$ of an integral of a finite-time trajectory $X(\tau)$ of a stochastic differential equation (SDE) conditioned on knowledge of the initial (current) state $X(t)=x$ (one-dimensional). The path-integral is defined in terms of the functions $h(x,t)\geq 0$, $f(x,t)$, and $\psi(x)$. The SDE is defined in terms of the functions $\mu(x,t)$ and $\sigma(x,t)$. Specifically we want to evaluate
+
+$$
+u(x,t) \equiv \mathrm{E}\left[ C_{path} + C_{terminal} \Bigg\rvert X(t) = x \right]
+$$
+
+where
+
+$$
+C_{path} = \int_{r=t}^{T}e^{-\int_{\tau=t}^{r}h(X,\tau)d\tau}\times f(X,r) dr
+$$
+
+and
+
+$$
+C_{terminal} = e^{-\int_{\tau=t}^{T}h(X,\tau)d\tau}\times\psi(X(T))
+$$
+
+subject to the drift-diffusion dynamics 
+
+$$dX = \mu(X,t)dt + \sigma(X,t)dW$$
+
+where $W$ is a Wiener process. If the function $f$, $\psi$, $h$, $\mu$, and $\sigma$ are not explicitly depending on the absolute time $t$ ($f(x,t)=f(x)$ and so on), then we may call the problem time-homogeneous. We call the general problem statement time-inhomogeneous. In what follows we stick with the general time-inhomogeneous problem.
+
+## Probability of path survival
+Let $f=0$ and $\psi=1$. Then 
+$$
+u(x,t) = \mathrm{E}\left[ e^{-\int_{\tau=t}^{T}h(X,\tau)d\tau} \Bigg\rvert X(t) = x \right]
+$$
+which is recognized as a (conditional) survival probability (the fraction of times we collect the terminal reward of one unit). We might call $h$ the hazard function, linking it to survival analysis. Further suppose $h(x,t)=\lambda$. Then the above value reduces to $u(x,t) = e^{-\lambda(T-t)}$, so that the survival probability is determined by an exponential distribution evaluated at the time-to-go point $T-t$, independent of the location $X(t)=x$. In the case that $h=0$ everywhere, then $u(x,t)=1$. All paths survive with probability one.
+
+## Example problem
+For illustration, we will work with a specific numerical example defined as follows.
+```{r toy-generator-system}
+
+# Drift-diffusion system
+mu.xt <- function(x, t) { 0.5*(x - t/2)^2 }
+sigma.xt <- function(x, t) { 0.1 + 0.9*t*(sin(pi*x))^2 }
+
+# Value-generating functions
+f.xt <- function(x, t) { cos(2*pi*t)/(1 + exp(-x^2/0.1)) }
+h.xt <- function(x, t) { 0.5 * (1 + x^2)*t + 0.5*x^4 }
+psi.x <- function(x) { 0.2 * sin(pi*x) }
+
+# Package the definitions
+sdep <- list(
+  mu = mu.xt,
+  sigma = sigma.xt,
+  f = f.xt,
+  h = h.xt,
+  psi = psi.x)
+
+# Domain (x=-L..L,t=0..T) and a trial point (x0,t0)
+L <- 1.0
+T <- 2.0
+t0 <- 0.250
+x0 <- -0.333
+dt <- 2e-4  # Euler-Maruyama step
+
+stopifnot(t0 >= 0 && t0 < T)
+stopifnot(abs(x0) < L)
+
+N <- 1000  # path realizations to use for value estimation (per approach)
+P <- 10    # path realizations to visualize once
+
+```
+
+```{r visual-realizations, echo=FALSE}
+if (P > 0) {
+  plot(c(0, T), c(-L, L), type = 'n', 
+    xlab = 'time', ylab = 'x, f, h, p, u',
+    main = sprintf('SDE samples (%ix out of %ix)', P, N))
+  lines(c(0, T), c(0, 0), type = 'l', col = 'black', lwd = 2, lty = 2)
+  for (ii in 1:P) {
+    rii <- sim.sde.euler(sdep, t0, x0, T, L, dt, save.path = TRUE)
+    lines(rii$t, rii$x, type = 'l', col = 'black')
+    lines(rii$t, rii$f, type = 'l', col = 'blue')
+    lines(rii$t, rii$h, type = 'l', col = 'red')
+    lines(rii$t, rii$p, type = 'l', col = 'green')
+    lines(rii$t, rii$u, type = 'l', col = 'purple')
+    points(rii$t[length(rii$t)], rii$utot, type = 'p', col = 'purple')
+  }
+  legend( 'bottomleft',
+    legend = c('state x', 'source f', 'hazard h', 'survival p', 'value u'),
+    lty = c(1, 1, 1, 1, 1),
+    lwd = c(2, 2, 2, 2, 2),
+    col = c("black", "blue", "red", "green", "purple"),
+    text.col = c("black", "blue", "red", "green", "purple") )
+}
+```
+
+We note from the above graph that the expected value function $u(x,t)$ attempts to summarize quite a mess.
+
+# Approaches
+
+## Deterministic backward PDE
+We can solve a Feynman-Kac PDE for $u(x,t)$ backward in time $t=T\ldots t_0$ using the terminal condition $u(x,T)=\psi(x)$. The inhomogeneous PDE is given as follows.
+
+$$
+\partial_t u + \mu(x,t)\partial_x u + \frac{1}{2}\sigma^2(x,t)\partial^2_{xx}u - h(x,t)u + f(x,t) = 0
+$$
+
+For simplicity we consider absorbing boundary conditions in space which means that $u(t,x=\pm L)=0$ for domain boundaries at $x=-L$ and $x=L$. This approach has the benefit that we get the value $u(x,t)$ for all $(x,t)$ (but the source terms $\psi$ and $f$ cannot be switched without requiring a resolve).
+
+```{r pde-feynman, echo=FALSE}
+nc.pde <- 60  # collocation nodes
+dt.pde <- dt
+
+pdep <- solve.backward.pde(sdep, 0, T, L, dt.pde, nc.pde)
+
+pdep.image <- render.pde(pdep, xx = seq(from = -L, to = L, len = 200))
+pdep.x0 <- render.pde(pdep, xx = x0)
+apx0 <- approx(pdep.x0$t, pdep.x0$Uxt, t0)
+
+image.plot(
+  pdep.image$t,
+  pdep.image$x,
+  t(pdep.image$Uxt),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = 'Feynman-Kac u(x,t)')
+
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+
+print(sprintf('backward PDE point value u(x=%.3f, t=%.3f) = %f', x0, t0, apx0$y))
+```
+
+## Deterministic forward PDE
+Another option is to solve for the density function $p(x,t)$ for $t=t_0\ldots T$, which is governed by the Fokker-Planck PDE
+$$
+\partial_t p = -\partial_x\left(\mu(x,t) p\right) + \frac{1}{2}\partial^2_{xx}\left(\sigma^2(x,t) p\right) - h(x,t) p
+$$
+with the initial condition $p(x, t_0) = p_0(x)$. If $p_0(x) = \delta(x-x_0)$, then the point value $u$ can be obtained by the integral
+$$
+u(x_0, t_0) = \int_{t_0}^{T} dt \int_{-L}^L dx f(x, t) p(x, t) + \int_{-L}^L dx \psi(x)p(x,T)
+$$
+It may be awkward to have a delta function as initial density so we may attempt the approximation $p_0(x)=\exp\left(-(x-x_0)^2/(2\sigma_0^2)\right)/(\sqrt{2\pi}\sigma_0)$. This approach has the benefit that we can recycle the solution $p(x,t)$ for any number of value functions $\psi$, $f$. A drawback is that we get only a point value $u(x_0, t_0)$.
+
+```{r pde-fokker, echo=FALSE}
+sigma0 <- 0.05
+
+pdepf <- solve.forward.pde(
+  sdep, t0, T, L, dt.pde, round(nc.pde * 1.50),
+  x0, sigma0, int.u0 = TRUE)
+
+pdepf.image <- render.pde(pdepf, xx = seq(from = -L, to = L, len = 200))
+
+#filled.contour(
+#  pdepf.image$t,
+#  pdepf.image$x,
+#  t(pdepf.image$Uxt),
+#  nlevel = 60,
+#  color.palette = viridis,
+#  xlab = 'time t',
+#  ylab = 'space x',
+#  main = 'Fokker-Planck p(x,t)')
+
+# downsample along t ? too big image ?
+image.plot(
+  pdepf.image$t,
+  pdepf.image$x,
+  t(pdepf.image$Uxt),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = 'Fokker-Planck p(x,t)')
+
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+
+print(sprintf('forward PDE point value u(x=%.3f, t=%.3f) = %f', x0, t0, pdepf$u0))
+```
+
+## Pointwise forward simulations
+We can pick a location $(x,t)$ and simulate the SDE forward $t\ldots T$ repeatedly and take the average of the path-integral as defined. This would give a point value estimate of $u(x,t)$. Another option is to kill each simulation at a local rate given by the hazard $h$. The average of the (possibly incomplete) path integrals of $f$ is the estimate of the value $u$ in this case (so only using $h$ to kill the path, not in the actual integration). Both methods should give the same result but in general the schemes have different variance properties and computational speed. A benefit is that this scales to high-dimensional problems. A drawback is that we only get random samples of point values $\widehat{u}(x, t)$ (see next subsection how this can be improved).
+
+```{r sde-sampling}
+sde.value.samples <- foreach(ii = 1:N, .combine = 'rbind',
+    .multicombine = TRUE, .inorder = FALSE) %doop% {
+  rii <- sim.sde.euler(sdep, t0, x0, T, L, dt, save.path = FALSE)
+  rii.alt <- sim.sde.euler.kill(sdep, t0, x0, T, L, dt, save.path = FALSE)
+  c(rii$utot, rii.alt$utot)
+}
+u.samples <- as.vector(sde.value.samples[, 1])
+u.samples.alt <- as.vector(sde.value.samples[, 2])
+```
+
+```{r sde-sampling-value-histograms, echo=FALSE}
+hbins <- 40
+h1 <- hist(u.samples, breaks = hbins, plot = FALSE)
+h2 <- hist(u.samples.alt, breaks = hbins, plot = FALSE)
+max.count <- max(max(h1$counts), max(h2$counts))
+plot(
+  c(min(min(h1$mids), min(h2$mids)), max(max(h1$mids), max(h2$mids))),
+  c(0, max.count),
+  type = 'n', 
+  xlab = sprintf('samples of u(x=%.3f, t=%.3f)', x0, t0),
+  ylab = 'histogram counts',
+  main = 'SDE path samples of point value u(t, x)')
+lines(h1, col = NULL, border = 'blue', lwd = 2, lty = 1)
+lines(h2, col = NULL, border = 'red', lwd = 2, lty = 1)
+lines(mean(u.samples) * c(1, 1), c(0, max.count), col = 'blue', lwd = 3, lty = 2)
+lines(mean(u.samples.alt) * c(1, 1), c(0, max.count), col = 'red', lwd = 3, lty = 2)
+lines(pdepf$u0 * c(1, 1), c(0, max.count), col = 'green', lwd = 3, lty = 2)
+lines(apx0$y * c(1, 1), c(0, max.count), col = 'black', lwd = 4, lty = 2)
+legend('topleft',
+  legend = c('sample A (full)', 'sample B (killed)', 'Fokker-Planck', 'Feynman-Kac'),
+  lty = c(2, 2, 2, 2),
+  lwd = c(3, 3, 3, 4),
+  col = c('blue', 'red', 'green', 'black'),
+  text.col = c('blue', 'red', 'green', 'black') )
+```
+
+## Scattered forward simulations
+The key idea here is that each observed path $(x,t)$ can be used as a sample for more than one point $u(x,t)$. Specifically, we get samples of $u$ also at times $\tau$, $t < \tau < T$. The aggregate path sample information may then cover a significant portion of the domain of interest. All we need to do is some book-keeping so that we count correctly. We illustrate this by "painting" the value surface using path realizations in two ways. The first always starts at the same initial point $(x_0, t_0)$. The second approach randomized the initial conditions uniformly over the domain. It is observed that starting at the same point gives a "search beam" forward for the value.
+
+```{r sde-paint-0-sample}
+xt.nx <- 100
+xt.nt <- 400
+xt.block <- 50
+sde.xto.0 <- foreach(ii = 1:round(N/xt.block), .combine = 'merge.xt.cell',
+  .multicombine = FALSE, .inorder = FALSE) %doop% {
+  xto <- create.xt.cells(xt.nx, c(-L, L), xt.nt, c(0, T))
+  for (jj in 1:xt.block) {
+    rij <- sim.sde.euler(sdep, t0, x0, T, L, dt, save.path = TRUE)
+    xto <- update.xt.cell(xto, rij)
+  }
+  xto
+}
+```
+
+```{r sde-paint-0, echo=FALSE}
+image.plot(
+  sde.xto.0$tmid,
+  sde.xto.0$xmid,
+  t(sde.xto.0$U),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = 'SDE painting, single IC')
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+```
+
+```{r sde-paint-1-sample}
+sde.xto.1 <- foreach(ii = 1:round(N/xt.block), .combine = 'merge.xt.cell',
+  .multicombine = FALSE, .inorder = FALSE) %doop% {
+  xto <- create.xt.cells(xt.nx, c(-L, L), xt.nt, c(0, T))
+  for (jj in 1:xt.block) {
+    rij <- sim.sde.euler(sdep, runif(1)*(T - 10*dt), L*(2*runif(1) - 1), T, L, dt, save.path = TRUE)
+    xto <- update.xt.cell(xto, rij)
+  }
+  xto
+}
+
+```{r sde-paint-1, echo=FALSE}
+image.plot(
+  sde.xto.1$tmid,
+  sde.xto.1$xmid,
+  t(sde.xto.1$U),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = 'SDE painting, uniform ICs')
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+```
+
+We can also paint the value function without access to the underlying hazard (as we did for the point value above). The resulting image has a bit more variance for the same number of path samples (here `r N`) and looks like this (single initial condition $u(x_0,t_0)$).
+
+```{r sde-paint-0k, echo=FALSE}
+sde.xto.0k <- foreach(ii = 1:round(N/xt.block), .combine = 'merge.xt.cell',
+  .multicombine = FALSE, .inorder = FALSE) %doop% {
+  xto <- create.xt.cells(xt.nx, c(-L, L), xt.nt, c(0, T))
+  for (jj in 1:xt.block) {
+    # do not log point hazards; but kills paths at the local rate
+    rij <- sim.sde.euler.kill(sdep, t0, x0, T, L, dt, save.path = TRUE)
+    # updater recognizes that the hazard is unobserved
+    xto <- update.xt.cell(xto, rij)
+  }
+  xto
+}
+
+image.plot(
+  sde.xto.0k$tmid,
+  sde.xto.0k$xmid,
+  t(sde.xto.0k$U),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = 'SDE painting, single IC, killed paths')
+
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+```
+
+## Dynamic programming
+It is "straightforward" to discretize the underlying SDE in space and time (this was also done, differently, behind the scenes above). If we partition the space into distinct cells, we end up with a typical discrete stochastic dynamic programming equation (i.e. Markov Process form) which is solved by backward induction.
+
+$$
+u_{i}(k) = r_{i}(k) + \gamma_{i}(k) \sum_j p_{i, j}(k) u_{j}(k + 1)
+$$
+
+Here $k$ is a discrete time index, $i$ is a space cell index, $r_i(k)$ is the local value accrued, $\gamma_i(k)$ is the probability of surviving the next transition, and $p_{i,j}(k) \geq 0$ is the transition probability for the jump $i\rightarrow j$. It generally holds $\sum_j p_{i,j}(k) \leq 1$ (probability mass can be consumed by e.g. an absorbing boundary). Term $r$ originates from source function $f$, $\gamma$ comes from hazard $h$, and the transition probabilities come from the drift and the diffusion $\mu$, $\sigma$.
+
+```{r dynp-solve}
+dynp.u <- solve.dynp.value(sdep, xt.nx, c(-L, L), xt.nt, c(0, T))
+```
+
+```{r dynp-plot, echo=FALSE}
+image.plot(
+  dynp.u$tmid,
+  dynp.u$xmid,
+  t(dynp.u$U),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = 'Dynamic programming / backward induction')
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+```
+
+Note that we could also discretize the underlying SDE as a forward Markov Process, as specified by $p_{i,j}(k)$ and $\gamma_i(k)$, therefore producing a pure discrete-time approximation of the Fokker-Planck approach.
+
+## Function approximations
+The simulation based valuation methods above do not reference the underlying dynamical system equations. They are based on seeing a stream of sample values $x$, $t$, $f$, $\psi$, and perhaps $h$. The stream generator can be a black-box. In contrast, the "complete solution methods"; Feynman-Kac, Fokker-Planck plus space-time integral, Dynamic Programming however require the full problem specifications.
+
+Suppose we observe the stream of samples $\left\{t,x\right\}$ over many paths, covering a significant portion of the state-space. If the time-step between observations is $\Delta$ we may consider each path increment $\mathrm{dx}$ ($x\rightarrow x+\mathrm{dx}$ as $t\rightarrow t+\Delta$) to be a sample from the normal distribution
+
+$$
+\mathrm{dx}(x,t) \sim \mathcal{N}\left(\mu(x,t)\Delta, \sigma^2(x,t)\Delta\right)
+$$
+
+This means we can back out $\widehat{\mu}$ and $\widehat{\sigma}$ given enough transition data $\left\{t,x,\mathrm{dx}\right\}$. One sneaky way to fit the drift-diffusion generating functions is to pose two distinct supervised learning problems. One, $f_1$ fits $\mathrm{dx}/\Delta$. The other, $f_2$, fits $\mathrm{dx}^2/\Delta$. It then follows $\widehat{\mu} = f_1$ and $\widehat{\sigma} = \left(f_2 - \Delta f_1^2\right)^{1/2}$. The source term can (in this case) be cast as a noise-free fitting problem $f_3 = \widehat{f}$. We can then proceed to solve the dynamic programming equation based on these estimated functions $\left\{f_1, f_2, f_3\right\}$. The below result used `xgboost` in the background (decision-tree based gradient boosting machine). As before, `r N` path samples were used.
+
+```{r xgb-utils-setup, echo=FALSE}
+
+decimate.dx.data <- function(r, nk) {
+  stopifnot(is.list(r))
+  nt <- length(r$t)
+  idx <- seq(from = 1, to = nt, by = nk)
+  nr <- (length(idx) - 1)
+  if (nr == 0) {
+    return(NULL)
+  }
+  dr <- array(NA, c(nr, 5))  # columns are {t, x, dx, f, h}
+  for (kk in 1:nr) {
+    ii <- idx[kk]
+    stopifnot(idx[kk + 1] == ii + nk)
+    dr[kk, 1] <- r$t[ii]
+    dr[kk, 2] <- r$x[ii]
+    dr[kk, 3] <- r$x[ii + nk] - r$x[ii]
+    dr[kk, 4] <- r$f[ii]
+    dr[kk, 5] <- r$h[ii]
+  }
+  colnames(dr) <- c('t', 'x', 'dx', 'f', 'h')
+  dr
+}
+
+suppressMessages(library(xgboost))
+
+fit.xgb.model <- function(
+  X, Y, parms,
+  maxrounds = 500, nthread = 2, nfold = 5,
+  verbose = FALSE, cvplot = FALSE)
+{
+  x.data <- xgb.DMatrix(as.matrix(X), label = Y)
+  x.cv <- xgb.cv(
+    data = x.data,
+    params = parms,
+    nrounds = maxrounds,
+    nthread = nthread,
+    nfold = nfold,
+    verbose = verbose)
+  if (cvplot) {
+    plot(x.cv$evaluation_log$iter, x.cv$evaluation_log$test_rmse_mean,
+      xlab = 'rounds', ylab = 'test RMSE loss')
+  }
+  idx <- which.min(x.cv$evaluation_log$test_rmse_mean)
+  x.mdl <- xgb.train(data = x.data, params = parms, nrounds = x.cv$evaluation_log$iter[idx])
+  list(
+    mdl = x.mdl,
+    cv = x.cv,
+    bestrounds = x.cv$evaluation_log$iter[idx],
+    train = x.cv$evaluation_log$train_rmse_mean[idx],
+    test = x.cv$evaluation_log$test_rmse_mean[idx])
+}
+
+```
+
+```{r sample-increments}
+xt.nk <- 10 # decimation factor
+xt.dat <- foreach(
+  ii = 1:round(N / xt.block), .combine = 'rbind',
+  .multicombine = FALSE, .inorder = FALSE) %doop%
+{
+  d <- NULL
+  for (jj in 1:xt.block) {
+    rij <- sim.sde.euler(sdep, runif(1) * (T - 10 * dt), L * (2 * runif(1) - 1), T, L, dt, save.path = TRUE)
+    tij <- decimate.dx.data(rij, xt.nk)
+    d <- rbind(d, tij)
+  }
+  d
+}
+
+```
+
+Now use the table `xt.dat` which has `r nrow(xt.dat)` rows (one per sample, decimated time-series data).
+
+```{r mu-sigma-eff-approx, echo = FALSE}
+x.params <- list(
+  booster = 'gbtree', 
+  tree_method = 'exact',
+  objective = 'reg:linear',
+  metric = 'rmse',
+  lambda = 1,
+  gamma = 0,
+  eta = 0.1, 
+  silent = 1, 
+  max.depth = 3,
+  min.child.weight = 3,
+  base.score = 0)
+
+sigma.min <- 0.01
+delta <- xt.nk * dt
+
+func.est.f1 <- fit.xgb.model(
+  xt.dat[, c('x', 't')],
+  (xt.dat[, 'dx'] / delta),
+  x.params)
+
+print(sprintf('fitted XGB model f1 ~ E[dx/delta] (%i rounds)', func.est.f1$bestrounds))
+
+func.est.f2 <- fit.xgb.model(
+  xt.dat[, c('x', 't')],
+  ((xt.dat[, 'dx'])^2 / delta),
+  x.params)
+
+print(sprintf('fitted XGB model f2 ~ E[dx^2/delta] (%i rounds)', func.est.f2$bestrounds))
+
+func.est.f3 <- fit.xgb.model(
+  xt.dat[, c('x', 't')],
+  xt.dat[, 'f'],
+  x.params)
+
+print(sprintf('fitted XGB model f3 ~ E[f] (%i rounds)', func.est.f3$bestrounds))
+
+f1m <- create.xt.cells(xt.nx, c(-L, L), xt.nt, c(0, T))
+f2m <- create.xt.cells(xt.nx, c(-L, L), xt.nt, c(0, T))
+f3m <- create.xt.cells(xt.nx, c(-L, L), xt.nt, c(0, T))
+for (jj in 1:xt.nt) {
+  xq1 <- cbind(f1m$xmid, array(f1m$tmid[jj], xt.nx)) 
+  f1q <- predict(func.est.f1$mdl, as.matrix(xq1))
+  f1m$U[, jj] <- f1q
+  f1m$W[, jj] <- sdep$mu(f1m$xmid, f1m$tmid[jj]) # store the true function in member "W"
+  f2q <- predict(func.est.f2$mdl, as.matrix(xq1)) # must be the same grid as for f1m
+  f2m$U[, jj] <- f2q
+  f2m$W[, jj] <- sdep$sigma(f1m$xmid, f1m$tmid[jj]) # store the true function in member "W"
+  f3q <- predict(func.est.f3$mdl, as.matrix(xq1)) # must be the same grid as for f1m
+  f3m$U[, jj] <- f3q
+  f3m$W[, jj] <- sdep$f(f1m$xmid, f1m$tmid[jj]) # store the true function in member "W"
+}
+
+Z <- f2m$U - delta * f1m$U^2
+Z <- sqrt(apply(Z, 1:2, max, sigma.min^2))
+
+mu.val <- f1m
+sigma.val <- f2m
+sigma.val$U <- Z
+f.val <- f3m
+
+dynp.est <- solve.dynp.value.est(sdep, mu.val, sigma.val, f.val)
+
+image.plot(
+  dynp.est$tmid,
+  dynp.est$xmid,
+  t(dynp.est$U),
+  col = viridis(256),
+  xlab = 'time t',
+  ylab = 'space x',
+  main = sprintf('Dyn-P reconstruction (from %ix path samples)', N))
+points(t0, x0, col = 'white', pch = 3, lwd = 4, cex = 3)
+
+dynp.rel.error <- sqrt(sum((dynp.est$U - dynp.u$U)^2) / sum(dynp.u$U^2))
+
+rmse.mu <- sqrt(sum((f1m$U - f1m$W)^2) / prod(dim(f1m$U)))
+rmse.sigma <- sqrt(sum((Z - f2m$W)^2) / prod(dim(f2m$U)))
+rmse.f <- sqrt(sum((f3m$U - f3m$W)^2) / prod(dim(f3m$U)))
+
+rel.err.mu <- rmse.mu / (sqrt(sum(f1m$W^2)/prod(dim(f1m$W))))
+rel.err.sigma <- rmse.sigma / (sqrt(sum(f2m$W^2)/prod(dim(f2m$W))))
+rel.err.f <- rmse.f / (sqrt(sum(f3m$W^2)/prod(dim(f3m$W))))
+
+```
+
+It is also possible to learn the hazard $h$ from the spatio-temporal killing rate. For simplicity, the true $h$ was used in the present illustration. The relative difference ($2$-norm) between the above plot and the corresponding full-information dynamic programming solution earlier is `r signif(dynp.rel.error, 3)`. The relative error in the drift estimate was `r signif(rel.err.mu, 3)`. The relative error in the diffusion estimate was `r signif(rel.err.sigma, 3)`. And the relative error in the source function was `r signif(rel.err.f, 3)`.
+
+# Notes
+
+Path value problems in higher dimensions are, in general, significantly more challenging.
+
+This `rmarkdown` document was built with `R` version `r getRversion()`.
+
+```{r stop-cluster-if-on, echo=FALSE}
+if (!is.null(this.clus)) {
+  stopCluster(this.clus)
+}
+```
